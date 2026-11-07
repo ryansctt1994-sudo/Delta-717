@@ -26,3 +26,7 @@ dist-ssr
 # Claim auditor checkout used by CI
 .claim-auditor/
 claim-audit-report.json
+
+# Python bytecode (the guide tests run Python)
+__pycache__/
+*.py[cod]
