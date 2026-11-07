@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p .
+
+      - name: Build
+        run: npm run build
+
+  guide:
+    # Runs the Python project the setup guide shows, file for file, as the
+    # guide tells readers to: pip install -r requirements.txt, python main.py.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the guide's runtime requirements
+        # jupyter is only for the notebook, which the tests check as JSON
+        run: python -m pip install "numpy>=1.24.0" "scipy>=1.10.0" "pytest>=8,<9"
+
+      - name: Test the guide's code
+        run: python -m pytest -q tests/guide
