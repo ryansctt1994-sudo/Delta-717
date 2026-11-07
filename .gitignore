@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Claim auditor checkout used by CI
+.claim-auditor/
+claim-audit-report.json
