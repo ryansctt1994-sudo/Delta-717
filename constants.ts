@@ -197,17 +197,24 @@ class ForensicLedger:
     """
     def __init__(self, ledger_file='governance_ledger.json'):
         self.ledger_file = ledger_file
+        # Must exist before _load_chain(): building the genesis block reads len(self.chain).
+        self.chain = []
         self.chain = self._load_chain()
 
     def _load_chain(self):
         try:
             with open(self.ledger_file, 'r') as f:
-                return json.load(f)
-        except (IOError, json.JSONDecodeError):
-            # Create genesis block
+                chain = json.load(f)
+        except FileNotFoundError:
+            # First run: create the genesis block
             genesis_block = self._create_block(proof=1, previous_hash='0', data={'message': 'Genesis Block'})
             self._save_chain([genesis_block])
             return [genesis_block]
+        # An existing ledger that is unreadable or fails verification is an error,
+        # never a reason to silently start a new chain over the old one.
+        if not self.verify_chain(chain):
+            raise ValueError(f"Ledger {self.ledger_file} failed hash-chain verification")
+        return chain
 
     def _save_chain(self, chain):
         with open(self.ledger_file, 'w') as f:
@@ -230,6 +237,21 @@ class ForensicLedger:
 
     def get_previous_block(self):
         return self.chain[-1]
+
+    def verify_chain(self, chain=None):
+        """
+        Returns True if every block links to the hash of the block before it.
+        Editing, deleting, inserting or reordering any block breaks a link.
+        """
+        chain = self.chain if chain is None else chain
+        if not chain or chain[0].get('previous_hash') != '0':
+            return False
+        for i in range(1, len(chain)):
+            if chain[i].get('index') != i + 1:
+                return False
+            if chain[i].get('previous_hash') != self._hash(chain[i - 1]):
+                return False
+        return True
 
     def record_event(self, event_data, proof=12345):
         """
