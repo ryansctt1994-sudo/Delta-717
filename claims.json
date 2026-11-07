@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "waivers": [
+    {
+      "term": "safe",
+      "file": "README.md",
+      "contains": "safe self-expanding tool creation",
+      "reason": "OWNER REVIEW: safety claim with no tests behind it. Resolve by rewording (e.g. 'sandboxed') or by adding tests and moving this to backed_claims."
+    },
+    {
+      "term": "safe",
+      "file": "README.md",
+      "contains": "Safe bounded self-modification rules",
+      "reason": "OWNER REVIEW: no implementation of M1-M3 in this repository. Reword or back with tests."
+    },
+    {
+      "term": "safe",
+      "file": "README.md",
+      "contains": "Safe Self-Expansion",
+      "reason": "OWNER REVIEW: section heading asserting safety without evidence. Reword or back with tests."
+    },
+    {
+      "term": "validated",
+      "file": "README.md",
+      "contains": "Z3-validated safety checks",
+      "reason": "OWNER REVIEW: there is no Z3 code in this repository. Remove, reword as planned work, or add the checks and back them."
+    },
+    {
+      "term": "ASI",
+      "file": "Weaver ASI",
+      "contains": "Weaver ASI",
+      "reason": "OWNER REVIEW: the file name makes the claim. Resolve by renaming the file (e.g. to describe it as the Delta-Weaver v2.4 file-set notes)."
+    },
+    {
+      "term": "safe",
+      "file": "Weaver ASI",
+      "contains": "type-safe state transitions",
+      "reason": "OWNER REVIEW: pasted design text claiming type safety for code that is not in this repository. Reword as design intent or remove."
+    },
+    {
+      "term": "validated",
+      "file": "Weaver ASI",
+      "contains": "CI-validated structure",
+      "reason": "OWNER REVIEW: pasted design checklist; the files it describes are not in this repository and have no CI. Reword as design intent or remove."
+    },
+    {
+      "term": "validated",
+      "file": "Weaver ASI",
+      "contains": "reasoning is compiled, validated, and executed",
+      "reason": "OWNER REVIEW: pasted design text describing a system that is not implemented here. Reword as design intent or remove."
+    },
+    {
+      "term": "safe",
+      "file": "constants.ts",
+      "contains": "engineering of safe and reliable AI",
+      "reason": "OWNER REVIEW: conclusion of the guide's whitepaper. Reword, or scope it to what tests/guide demonstrates."
+    },
+    {
+      "term": "safe",
+      "file": "zorel ",
+      "contains": "# 1. Safe Return if Disabled",
+      "reason": "Not a claim: code-comment label in a pasted transcript. (The path it labels returns ALLOW when the gate is disabled; Weaver--Cathedral-'s rebuilt gate removes that fail-open mode.)"
+    },
+    {
+      "term": "validated",
+      "file": "zorel ",
+      "contains": "is validated by current trends",
+      "reason": "Not a claim: canned output of a mock LLM in the transcript's demo."
+    }
+  ]
+}
