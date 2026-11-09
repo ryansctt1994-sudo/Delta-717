@@ -190,10 +190,13 @@ __all__ = ["Sentinel", "SignalIntegrityMonitor", "ForensicLedger"]`,
   'core/ledger.py': `import json
 import hashlib
 import datetime
+import os
+import tempfile
+from pathlib import Path
 
 class ForensicLedger:
     """
-    Immutable audit trail with hash chaining for verifiable logging.
+    Local hash-chained audit log; not externally authenticated or tamper-proof.
     """
     def __init__(self, ledger_file='governance_ledger.json'):
         self.ledger_file = ledger_file
@@ -217,8 +220,24 @@ class ForensicLedger:
         return chain
 
     def _save_chain(self, chain):
-        with open(self.ledger_file, 'w') as f:
-            json.dump(chain, f, indent=4)
+        # Write a complete snapshot beside the ledger, then replace it atomically.
+        # This avoids truncating the previous snapshot if serialization or a
+        # write fails. It does NOT provide multi-process locking or an
+        # independently authenticated checkpoint.
+        ledger_path = Path(self.ledger_file)
+        fd, staging = tempfile.mkstemp(
+            prefix='.' + ledger_path.name + '.', suffix='.tmp',
+            dir=str(ledger_path.parent)
+        )
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(chain, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(staging, ledger_path)
+        finally:
+            if os.path.exists(staging):
+                os.unlink(staging)
 
     def _hash(self, block):
         """Hashes a block."""
@@ -244,12 +263,22 @@ class ForensicLedger:
         Editing, deleting, inserting or reordering any block breaks a link.
         """
         chain = self.chain if chain is None else chain
-        if not chain or chain[0].get('previous_hash') != '0':
+        if not isinstance(chain, list) or not chain:
             return False
-        for i in range(1, len(chain)):
-            if chain[i].get('index') != i + 1:
+        for i, block in enumerate(chain):
+            if not isinstance(block, dict):
                 return False
-            if chain[i].get('previous_hash') != self._hash(chain[i - 1]):
+            if type(block.get('index')) is not int or block['index'] != i + 1:
+                return False
+            if not all(key in block for key in ('data', 'proof', 'timestamp')):
+                return False
+            previous_hash = block.get('previous_hash')
+            if not isinstance(previous_hash, str):
+                return False
+            if i == 0:
+                if previous_hash != '0':
+                    return False
+            elif previous_hash != self._hash(chain[i - 1]):
                 return False
         return True
 
@@ -257,14 +286,21 @@ class ForensicLedger:
         """
         Records a new event to the ledger.
         """
+        # Freeze caller-owned payload values before committing: changing the
+        # original input dictionary later must not rewrite live chain memory.
+        # Reject non-JSON and nonfinite numeric payloads rather than silently
+        # admitting values that cannot round-trip as JSON.
+        frozen_data = json.loads(json.dumps(event_data, allow_nan=False))
         previous_block = self.get_previous_block()
         previous_hash = self._hash(previous_block)
-        block = self._create_block(proof, previous_hash, event_data)
-        self.chain.append(block)
-        self._save_chain(self.chain)
+        block = self._create_block(proof, previous_hash, frozen_data)
+        next_chain = self.chain + [block]
+        self._save_chain(next_chain)
+        self.chain = next_chain
         return block
 `,
-  'core/sentinel.py': `import numpy as np
+  'core/sentinel.py': `import math
+import numpy as np
 
 class Sentinel:
     """
@@ -295,10 +331,17 @@ class Sentinel:
         Returns:
             dict: A decision dictionary with 'status' and 'reason'.
         """
-        uncertainty = monitor_output.get('epistemic_uncertainty')
+        if not isinstance(monitor_output, dict):
+            return {'status': 'VETO', 'reason': 'Monitor output must be a dictionary.'}
 
+        uncertainty = monitor_output.get('epistemic_uncertainty')
         if uncertainty is None:
             return {'status': 'VETO', 'reason': 'Missing epistemic_uncertainty value.'}
+        if (isinstance(uncertainty, (bool, np.bool_))
+                or not isinstance(uncertainty, (int, float, np.integer, np.floating))
+                or not math.isfinite(float(uncertainty))
+                or not 0.0 <= float(uncertainty) <= 1.0):
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
 
         if uncertainty >= self.threshold:
             decision = {
@@ -334,21 +377,32 @@ class SignalIntegrityMonitor:
         Returns:
             dict: A dictionary containing the calculated epistemic uncertainty.
         """
-        if not np.isclose(np.sum(probability_distribution), 1.0):
+        try:
+            probabilities = np.asarray(probability_distribution, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Probabilities must be a numeric vector.") from exc
+
+        if (probabilities.ndim != 1 or probabilities.size == 0
+                or not np.all(np.isfinite(probabilities))
+                or np.any(probabilities < 0) or np.any(probabilities > 1)):
+            raise ValueError("Probabilities must be a nonempty finite vector in [0, 1].")
+        if not np.isclose(np.sum(probabilities), 1.0, rtol=0, atol=1e-9):
             raise ValueError("Probabilities must sum to 1.")
-        
+
         # Normalize entropy to be between 0 and 1 for easier interpretation.
         # H_max = log_2(N), where N is the number of outcomes.
-        num_outcomes = len(probability_distribution)
+        num_outcomes = len(probabilities)
         if num_outcomes <= 1:
             # Entropy is 0 if there's only one outcome
             normalized_entropy = 0.0
         else:
-            shannon_entropy = entropy(probability_distribution, base=2)
+            shannon_entropy = entropy(probabilities, base=2)
             max_entropy = np.log2(num_outcomes)
             normalized_entropy = shannon_entropy / max_entropy
 
-        return {'epistemic_uncertainty': normalized_entropy}
+        if not np.isfinite(normalized_entropy) or not -1e-12 <= normalized_entropy <= 1 + 1e-12:
+            raise ValueError("Computed uncertainty must be finite and normalized.")
+        return {'epistemic_uncertainty': float(np.clip(normalized_entropy, 0.0, 1.0))}
 `,
     'docs/whitepaper.md': `# Delta-717 Governance Core: A Falsifiable AI Safety Framework
 
