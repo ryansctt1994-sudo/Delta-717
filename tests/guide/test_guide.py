@@ -469,3 +469,90 @@ def test_negative_control_bad_input_has_no_automatic_veto_receipt(project):
     """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[-1] == "OPEN_GAP_NO_AUTOMATIC_VETO_RECEIPT"
+
+
+# --- Dependent runtime fix: invalid monitor data must be ledgered as VETO -----
+
+
+@pytest.mark.parametrize(
+    "input_expr",
+    [
+        "np.array([-0.1, 1.1])",
+        "np.array([float('nan'), 1.0])",
+        "None",
+    ],
+    ids=["negative_probability", "nan_probability", "missing_vector"],
+)
+def test_invalid_monitor_input_creates_durable_veto_receipt(project, input_expr):
+    result = run_py(project, f"""
+        import json
+        import numpy as np
+        from pathlib import Path
+        from main import run_simulation
+        from core.ledger import ForensicLedger
+        run_simulation([
+            {{'name': 'Bad distribution', 'input_probs': {input_expr},
+              'description': 'Negative-control input'}}
+        ], ledger_file='audit_log.json')
+        ledger = ForensicLedger('audit_log.json')
+        assert ledger.verify_chain()
+        assert len(ledger.chain) == 2
+        event = ledger.chain[-1]['data']
+        assert event['sentinel_decision']['status'] == 'VETO'
+        assert event['sim_analysis']['epistemic_uncertainty'] is None
+        assert event['sim_analysis']['validation_error_type']
+        def refuse_nonfinite(token):
+            raise AssertionError('Nonstandard JSON constant: ' + token)
+        json.loads(Path('audit_log.json').read_text(), parse_constant=refuse_nonfinite)
+        print('INVALID_INPUT_VETO_RECEIPT_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "INVALID_INPUT_VETO_RECEIPT_PASS"
+
+
+def test_demo_records_approval_and_veto_before_reporting(project):
+    result = run_py(project, """
+        import json
+        from main import run_simulation
+        from core.ledger import ForensicLedger
+        run_simulation([
+            {'name': 'confident', 'input_probs': [1.0, 0.0]},
+            {'name': 'uncertain', 'input_probs': [0.5, 0.5]}
+        ], ledger_file='audit_log.json')
+        chain = ForensicLedger('audit_log.json').chain
+        assert [item['data']['sentinel_decision']['status']
+                for item in chain[1:]] == ['APPROVED', 'VETO']
+        print('BOTH_DISPOSITIONS_COMMITTED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "BOTH_DISPOSITIONS_COMMITTED_PASS"
+
+
+def test_failed_ledger_save_cannot_report_approval(project):
+    result = run_py(project, """
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.ledger import ForensicLedger
+        from main import run_simulation
+        ledger = ForensicLedger('audit_log.json')
+        before = Path('audit_log.json').read_bytes()
+        captured = StringIO()
+        with patch('core.ledger.os.replace', side_effect=OSError('failed disk write')):
+            try:
+                with redirect_stdout(captured):
+                    run_simulation([
+                        {'name': 'confident', 'input_probs': [1.0, 0.0]}
+                    ], ledger_file='audit_log.json')
+            except OSError:
+                pass
+            else:
+                raise AssertionError('persist failure was swallowed')
+        assert 'Action APPROVED' not in captured.getvalue()
+        assert Path('audit_log.json').read_bytes() == before
+        assert len(ForensicLedger('audit_log.json').chain) == 1
+        print('NO_APPROVAL_WITHOUT_RECEIPT_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "NO_APPROVAL_WITHOUT_RECEIPT_PASS"
