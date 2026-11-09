@@ -286,9 +286,14 @@ class ForensicLedger:
         """
         Records a new event to the ledger.
         """
+        # Freeze caller-owned payload values before committing: changing the
+        # original input dictionary later must not rewrite live chain memory.
+        # Reject non-JSON and nonfinite numeric payloads rather than silently
+        # admitting values that cannot round-trip as JSON.
+        frozen_data = json.loads(json.dumps(event_data, allow_nan=False))
         previous_block = self.get_previous_block()
         previous_hash = self._hash(previous_block)
-        block = self._create_block(proof, previous_hash, event_data)
+        block = self._create_block(proof, previous_hash, frozen_data)
         next_chain = self.chain + [block]
         self._save_chain(next_chain)
         self.chain = next_chain
