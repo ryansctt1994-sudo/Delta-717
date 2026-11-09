@@ -285,3 +285,68 @@ def test_replace_receives_complete_staged_json_before_original_changes(project):
     """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[-1] == "ATOMIC_REPLACE_PASS"
+
+
+def test_caller_cannot_mutate_ledger_event_after_recording(project):
+    result = run_py(project, """
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        payload = {'decision': {'status': 'VETO'}, 'values': [1, 2]}
+        ledger.record_event(payload)
+        payload['decision']['status'] = 'APPROVED'
+        payload['values'].append(3)
+        assert ledger.chain[-1]['data'] == {
+            'decision': {'status': 'VETO'}, 'values': [1, 2]
+        }
+        assert ledger.verify_chain()
+        assert ForensicLedger('audit_log.json').verify_chain()
+        print('SNAPSHOT_ISOLATED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "SNAPSHOT_ISOLATED_PASS"
+
+
+def test_nonfinite_event_payload_cannot_change_snapshot(project):
+    result = run_py(project, """
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        path = Path('audit_log.json')
+        old = path.read_bytes()
+        old_length = len(ledger.chain)
+        try:
+            ledger.record_event({'value': float('nan')})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('nonfinite JSON payload was accepted')
+        assert path.read_bytes() == old
+        assert len(ledger.chain) == old_length
+        print('NONFINITE_REJECTED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "NONFINITE_REJECTED_PASS"
+
+
+def test_negative_control_whole_chain_rehash_is_not_authenticated(project):
+    # This test deliberately confirms the *limit* of an unsigned hash chain.
+    # Recomputing its links after editing an event can still fool verification.
+    result = run_py(project, """
+        import json
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        ledger.record_event({'decision': 'VETO'})
+        ledger.record_event({'decision': 'VETO'})
+        path = Path('audit_log.json')
+        chain = json.loads(path.read_text())
+        chain[1]['data']['decision'] = 'APPROVED'
+        for i in range(2, len(chain)):
+            chain[i]['previous_hash'] = ForensicLedger._hash(None, chain[i-1])
+        path.write_text(json.dumps(chain))
+        assert ForensicLedger('audit_log.json').verify_chain()
+        print('UNAUTHENTICATED_REHASH_CONFIRMED')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "UNAUTHENTICATED_REHASH_CONFIRMED"
