@@ -479,9 +479,11 @@ def test_direct_monitor_call_has_no_automatic_audit_receipt(project):
     [
         "np.array([-0.1, 1.1])",
         "np.array([float('nan'), 1.0])",
+        "np.array([float('inf'), 1.0])",
+        "np.array([[0.5, 0.5]])",
         "None",
     ],
-    ids=["negative_probability", "nan_probability", "missing_vector"],
+    ids=["negative_probability", "nan_probability", "infinite_probability", "matrix_probability", "missing_vector"],
 )
 def test_invalid_monitor_input_creates_durable_veto_receipt(project, input_expr):
     result = run_py(project, f"""
@@ -556,3 +558,32 @@ def test_failed_ledger_save_cannot_report_approval(project):
     """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[-1] == "NO_APPROVAL_WITHOUT_RECEIPT_PASS"
+
+
+def test_failed_ledger_save_cannot_report_veto(project):
+    result = run_py(project, """
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.ledger import ForensicLedger
+        from main import run_simulation
+        ForensicLedger('audit_log.json')
+        before = Path('audit_log.json').read_bytes()
+        captured = StringIO()
+        with patch('core.ledger.os.replace', side_effect=OSError('failed veto write')):
+            try:
+                with redirect_stdout(captured):
+                    run_simulation([
+                        {'name': 'bad', 'input_probs': [-0.1, 1.1]}
+                    ], ledger_file='audit_log.json')
+            except OSError:
+                pass
+            else:
+                raise AssertionError('VETO receipt failure was swallowed')
+        assert '[SENTINEL] VETO' not in captured.getvalue()
+        assert Path('audit_log.json').read_bytes() == before
+        print('NO_VETO_ANNOUNCEMENT_WITHOUT_RECEIPT_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "NO_VETO_ANNOUNCEMENT_WITHOUT_RECEIPT_PASS"
