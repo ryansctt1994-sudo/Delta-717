@@ -299,7 +299,8 @@ class ForensicLedger:
         self.chain = next_chain
         return block
 `,
-  'core/sentinel.py': `import numpy as np
+  'core/sentinel.py': `import math
+import numpy as np
 
 class Sentinel:
     """
@@ -330,10 +331,17 @@ class Sentinel:
         Returns:
             dict: A decision dictionary with 'status' and 'reason'.
         """
-        uncertainty = monitor_output.get('epistemic_uncertainty')
+        if not isinstance(monitor_output, dict):
+            return {'status': 'VETO', 'reason': 'Monitor output must be a dictionary.'}
 
+        uncertainty = monitor_output.get('epistemic_uncertainty')
         if uncertainty is None:
             return {'status': 'VETO', 'reason': 'Missing epistemic_uncertainty value.'}
+        if (isinstance(uncertainty, (bool, np.bool_))
+                or not isinstance(uncertainty, (int, float, np.integer, np.floating))
+                or not math.isfinite(float(uncertainty))
+                or not 0.0 <= float(uncertainty) <= 1.0):
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
 
         if uncertainty >= self.threshold:
             decision = {
@@ -369,21 +377,32 @@ class SignalIntegrityMonitor:
         Returns:
             dict: A dictionary containing the calculated epistemic uncertainty.
         """
-        if not np.isclose(np.sum(probability_distribution), 1.0):
+        try:
+            probabilities = np.asarray(probability_distribution, dtype=float)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Probabilities must be a numeric vector.") from exc
+
+        if (probabilities.ndim != 1 or probabilities.size == 0
+                or not np.all(np.isfinite(probabilities))
+                or np.any(probabilities < 0) or np.any(probabilities > 1)):
+            raise ValueError("Probabilities must be a nonempty finite vector in [0, 1].")
+        if not np.isclose(np.sum(probabilities), 1.0, rtol=0, atol=1e-9):
             raise ValueError("Probabilities must sum to 1.")
-        
+
         # Normalize entropy to be between 0 and 1 for easier interpretation.
         # H_max = log_2(N), where N is the number of outcomes.
-        num_outcomes = len(probability_distribution)
+        num_outcomes = len(probabilities)
         if num_outcomes <= 1:
             # Entropy is 0 if there's only one outcome
             normalized_entropy = 0.0
         else:
-            shannon_entropy = entropy(probability_distribution, base=2)
+            shannon_entropy = entropy(probabilities, base=2)
             max_entropy = np.log2(num_outcomes)
             normalized_entropy = shannon_entropy / max_entropy
 
-        return {'epistemic_uncertainty': normalized_entropy}
+        if not np.isfinite(normalized_entropy) or not -1e-12 <= normalized_entropy <= 1 + 1e-12:
+            raise ValueError("Computed uncertainty must be finite and normalized.")
+        return {'epistemic_uncertainty': float(np.clip(normalized_entropy, 0.0, 1.0))}
 `,
     'docs/whitepaper.md': `# Delta-717 Governance Core: A Falsifiable AI Safety Framework
 
