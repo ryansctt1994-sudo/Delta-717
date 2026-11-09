@@ -450,10 +450,10 @@ def test_integrated_monitor_sentinel_and_ledger_roundtrip(project):
     assert result.stdout.splitlines()[-1] == "COMBINED_CONTROL_PLANE_PASS"
 
 
-def test_negative_control_bad_input_has_no_automatic_veto_receipt(project):
-    # Known remaining limit: monitor refuses invalid input, but this prototype
-    # does not yet catch it in a top-level runtime and commit a VETO receipt.
-    # This observes the gap rather than silently promoting a safety claim.
+def test_direct_monitor_call_has_no_automatic_audit_receipt(project):
+    # A direct monitor invocation cannot be conflated with the bounded
+    # run_simulation() loop, which now captures input errors as VETO receipts.
+    # Calling an isolated component still has no automatic audit binding.
     result = run_py(project, """
         from core.ledger import ForensicLedger
         from core.sim_engine import SignalIntegrityMonitor
