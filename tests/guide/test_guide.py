@@ -198,3 +198,392 @@ def test_signal_monitor_rejects_non_distributions(guide):
     """)
     lines = [line for line in result.stdout.splitlines() if "initialized" not in line]
     assert lines == ["1.0", "0.0", "REFUSED"], result.stdout + result.stderr
+
+
+# --- Atomic snapshot and fail-closed ledger structure -------------------------
+
+
+@pytest.mark.parametrize(
+    "invalid_chain",
+    [
+        "[]",
+        "'not a chain'",
+        "[3]",
+        "[{'index': 0, 'previous_hash': '0', 'timestamp': 't', 'proof': 1, 'data': {}}]",
+        "[{'index': 1, 'previous_hash': '0', 'timestamp': 't', 'proof': 1}]",
+    ],
+    ids=["empty", "not-list", "not-dict", "incorrect-genesis-index", "missing-field"],
+)
+def test_malformed_existing_ledger_is_refused_without_overwrite(project, invalid_chain):
+    result = run_py(project, f"""
+        import json
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        original = json.dumps({invalid_chain})
+        path = Path('audit_log.json')
+        path.write_text(original)
+        try:
+            ForensicLedger(str(path))
+        except ValueError:
+            print('REFUSED')
+        else:
+            print('ACCEPTED')
+        assert path.read_text() == original
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "REFUSED"
+
+
+def test_failed_atomic_replace_preserves_previous_snapshot_and_memory(project):
+    result = run_py(project, """
+        import os
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.ledger import ForensicLedger
+        path = Path('audit_log.json')
+        ledger = ForensicLedger(str(path))
+        previous = path.read_bytes()
+        chain_length = len(ledger.chain)
+        with patch('core.ledger.os.replace', side_effect=OSError('simulated replace failure')):
+            try:
+                ledger.record_event({'status': 'PENDING'})
+                raise AssertionError('expected failed save')
+            except OSError:
+                pass
+        assert path.read_bytes() == previous
+        assert len(ledger.chain) == chain_length
+        assert ForensicLedger(str(path)).verify_chain()
+        assert not list(path.parent.glob('.audit_log.json.*.tmp'))
+        print('ATOMIC_ROLLBACK_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "ATOMIC_ROLLBACK_PASS"
+
+
+def test_replace_receives_complete_staged_json_before_original_changes(project):
+    result = run_py(project, """
+        import json
+        import os
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.ledger import ForensicLedger
+        path = Path('audit_log.json')
+        ledger = ForensicLedger(str(path))
+        previous = path.read_bytes()
+        real_replace = os.replace
+        def checked_replace(staged, target):
+            with open(staged, encoding='utf-8') as f:
+                pending = json.load(f)
+            assert len(pending) == 2
+            assert path.read_bytes() == previous
+            return real_replace(staged, target)
+        with patch('core.ledger.os.replace', side_effect=checked_replace):
+            ledger.record_event({'status': 'APPROVED'})
+        assert len(ledger.chain) == 2
+        assert ForensicLedger(str(path)).verify_chain()
+        print('ATOMIC_REPLACE_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "ATOMIC_REPLACE_PASS"
+
+
+def test_caller_cannot_mutate_ledger_event_after_recording(project):
+    result = run_py(project, """
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        payload = {'decision': {'status': 'VETO'}, 'values': [1, 2]}
+        ledger.record_event(payload)
+        payload['decision']['status'] = 'APPROVED'
+        payload['values'].append(3)
+        assert ledger.chain[-1]['data'] == {
+            'decision': {'status': 'VETO'}, 'values': [1, 2]
+        }
+        assert ledger.verify_chain()
+        assert ForensicLedger('audit_log.json').verify_chain()
+        print('SNAPSHOT_ISOLATED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "SNAPSHOT_ISOLATED_PASS"
+
+
+def test_nonfinite_event_payload_cannot_change_snapshot(project):
+    result = run_py(project, """
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        path = Path('audit_log.json')
+        old = path.read_bytes()
+        old_length = len(ledger.chain)
+        try:
+            ledger.record_event({'value': float('nan')})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('nonfinite JSON payload was accepted')
+        assert path.read_bytes() == old
+        assert len(ledger.chain) == old_length
+        print('NONFINITE_REJECTED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "NONFINITE_REJECTED_PASS"
+
+
+def test_negative_control_whole_chain_rehash_is_not_authenticated(project):
+    # This test deliberately confirms the *limit* of an unsigned hash chain.
+    # Recomputing its links after editing an event can still fool verification.
+    result = run_py(project, """
+        import json
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        ledger.record_event({'decision': 'VETO'})
+        ledger.record_event({'decision': 'VETO'})
+        path = Path('audit_log.json')
+        chain = json.loads(path.read_text())
+        chain[1]['data']['decision'] = 'APPROVED'
+        for i in range(2, len(chain)):
+            chain[i]['previous_hash'] = ForensicLedger._hash(None, chain[i-1])
+        path.write_text(json.dumps(chain))
+        assert ForensicLedger('audit_log.json').verify_chain()
+        print('UNAUTHENTICATED_REHASH_CONFIRMED')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "UNAUTHENTICATED_REHASH_CONFIRMED"
+
+
+# --- Boundary regression: never approve invalid uncertainty -----------------
+
+
+@pytest.mark.parametrize(
+    "bad_probs",
+    [
+        "[-0.1, 1.1]",
+        "[float('nan'), 1.0]",
+        "[float('inf'), float('-inf')]",
+        "[0.2, 0.2]",
+        "[]",
+        "1.0",
+        "[[0.5, 0.5]]",
+    ],
+    ids=["negative", "nan", "infinite", "unnormalized", "empty", "scalar", "matrix"],
+)
+def test_monitor_rejects_invalid_probability_vectors(guide, bad_probs):
+    result = run_py(guide[0], f"""
+        import numpy as np
+        from core.sim_engine import SignalIntegrityMonitor
+        monitor = SignalIntegrityMonitor()
+        try:
+            monitor.analyze_signal(np.asarray({bad_probs}, dtype=float))
+        except ValueError:
+            print('REFUSED')
+        else:
+            print('ACCEPTED')
+    """)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == "REFUSED", result.stdout + result.stderr
+
+
+def test_sentinel_rejects_nonfinite_out_of_range_and_non_numeric_values(guide):
+    result = run_py(guide[0], """
+        from core.sentinel import Sentinel
+        s = Sentinel(uncertainty_threshold=0.7)
+        invalid = [float('nan'), float('inf'), float('-inf'),
+                   -0.1, 1.1, '0.1', True, None, complex(1, 0)]
+        for value in invalid:
+            assert s.evaluate({'epistemic_uncertainty': value})['status'] == 'VETO', value
+        for malformed in (None, [], 'monitor'):
+            assert s.evaluate(malformed)['status'] == 'VETO'
+        assert s.evaluate({'epistemic_uncertainty': 0.0})['status'] == 'APPROVED'
+        assert s.evaluate({'epistemic_uncertainty': 0.7})['status'] == 'VETO'
+        assert s.evaluate({'epistemic_uncertainty': 1.0})['status'] == 'VETO'
+        print('BOUNDARY_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "BOUNDARY_PASS"
+
+
+def test_monitor_known_distributions_still_have_expected_entropy(guide):
+    result = run_py(guide[0], """
+        import numpy as np
+        from core.sim_engine import SignalIntegrityMonitor
+        monitor = SignalIntegrityMonitor()
+        assert monitor.analyze_signal([1.0])['epistemic_uncertainty'] == 0.0
+        assert monitor.analyze_signal([0.0, 1.0])['epistemic_uncertainty'] == 0.0
+        assert monitor.analyze_signal([0.5, 0.5])['epistemic_uncertainty'] == 1.0
+        assert monitor.analyze_signal(np.array([0.25] * 4))['epistemic_uncertainty'] == 1.0
+        print('DISTRIBUTIONS_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "DISTRIBUTIONS_PASS"
+
+
+# --- Cross-component integration gates (both repair branches together) -------
+
+
+def test_integrated_monitor_sentinel_and_ledger_roundtrip(project):
+    result = run_py(project, """
+        from core.sentinel import Sentinel
+        from core.sim_engine import SignalIntegrityMonitor
+        from core.ledger import ForensicLedger
+        monitor = SignalIntegrityMonitor()
+        sentinel = Sentinel(uncertainty_threshold=0.7)
+        ledger = ForensicLedger('audit_log.json')
+        statuses = []
+        for probabilities in ([1.0, 0.0], [0.5, 0.5]):
+            observation = monitor.analyze_signal(probabilities)
+            verdict = sentinel.evaluate(observation)
+            ledger.record_event({
+                'input': probabilities,
+                'analysis': observation,
+                'decision': verdict,
+            })
+            statuses.append(verdict['status'])
+        assert statuses == ['APPROVED', 'VETO']
+        assert ledger.verify_chain()
+        reread = ForensicLedger('audit_log.json')
+        assert len(reread.chain) == 3
+        assert [x['data']['decision']['status'] for x in reread.chain[1:]] == statuses
+        print('COMBINED_CONTROL_PLANE_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "COMBINED_CONTROL_PLANE_PASS"
+
+
+def test_direct_monitor_call_has_no_automatic_audit_receipt(project):
+    # A direct monitor invocation cannot be conflated with the bounded
+    # run_simulation() loop, which now captures input errors as VETO receipts.
+    # Calling an isolated component still has no automatic audit binding.
+    result = run_py(project, """
+        from core.ledger import ForensicLedger
+        from core.sim_engine import SignalIntegrityMonitor
+        ledger = ForensicLedger('audit_log.json')
+        try:
+            SignalIntegrityMonitor().analyze_signal([-0.1, 1.1])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid input accepted')
+        assert len(ledger.chain) == 1  # Genesis only; no VETO receipt.
+        print('OPEN_GAP_NO_AUTOMATIC_VETO_RECEIPT')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "OPEN_GAP_NO_AUTOMATIC_VETO_RECEIPT"
+
+
+# --- Dependent runtime fix: invalid monitor data must be ledgered as VETO -----
+
+
+@pytest.mark.parametrize(
+    "input_expr",
+    [
+        "np.array([-0.1, 1.1])",
+        "np.array([float('nan'), 1.0])",
+        "np.array([float('inf'), 1.0])",
+        "np.array([[0.5, 0.5]])",
+        "None",
+    ],
+    ids=["negative_probability", "nan_probability", "infinite_probability", "matrix_probability", "missing_vector"],
+)
+def test_invalid_monitor_input_creates_durable_veto_receipt(project, input_expr):
+    result = run_py(project, f"""
+        import json
+        import numpy as np
+        from pathlib import Path
+        from main import run_simulation
+        from core.ledger import ForensicLedger
+        run_simulation([
+            {{'name': 'Bad distribution', 'input_probs': {input_expr},
+              'description': 'Negative-control input'}}
+        ], ledger_file='audit_log.json')
+        ledger = ForensicLedger('audit_log.json')
+        assert ledger.verify_chain()
+        assert len(ledger.chain) == 2
+        event = ledger.chain[-1]['data']
+        assert event['sentinel_decision']['status'] == 'VETO'
+        assert event['sim_analysis']['epistemic_uncertainty'] is None
+        assert event['sim_analysis']['validation_error_type']
+        def refuse_nonfinite(token):
+            raise AssertionError('Nonstandard JSON constant: ' + token)
+        json.loads(Path('audit_log.json').read_text(), parse_constant=refuse_nonfinite)
+        print('INVALID_INPUT_VETO_RECEIPT_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "INVALID_INPUT_VETO_RECEIPT_PASS"
+
+
+def test_demo_records_approval_and_veto_before_reporting(project):
+    result = run_py(project, """
+        import json
+        from main import run_simulation
+        from core.ledger import ForensicLedger
+        run_simulation([
+            {'name': 'confident', 'input_probs': [1.0, 0.0]},
+            {'name': 'uncertain', 'input_probs': [0.5, 0.5]}
+        ], ledger_file='audit_log.json')
+        chain = ForensicLedger('audit_log.json').chain
+        assert [item['data']['sentinel_decision']['status']
+                for item in chain[1:]] == ['APPROVED', 'VETO']
+        print('BOTH_DISPOSITIONS_COMMITTED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "BOTH_DISPOSITIONS_COMMITTED_PASS"
+
+
+def test_failed_ledger_save_cannot_report_approval(project):
+    result = run_py(project, """
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.ledger import ForensicLedger
+        from main import run_simulation
+        ledger = ForensicLedger('audit_log.json')
+        before = Path('audit_log.json').read_bytes()
+        captured = StringIO()
+        with patch('core.ledger.os.replace', side_effect=OSError('failed disk write')):
+            try:
+                with redirect_stdout(captured):
+                    run_simulation([
+                        {'name': 'confident', 'input_probs': [1.0, 0.0]}
+                    ], ledger_file='audit_log.json')
+            except OSError:
+                pass
+            else:
+                raise AssertionError('persist failure was swallowed')
+        assert 'Action APPROVED' not in captured.getvalue()
+        assert Path('audit_log.json').read_bytes() == before
+        assert len(ForensicLedger('audit_log.json').chain) == 1
+        print('NO_APPROVAL_WITHOUT_RECEIPT_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "NO_APPROVAL_WITHOUT_RECEIPT_PASS"
+
+
+def test_failed_ledger_save_cannot_report_veto(project):
+    result = run_py(project, """
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.ledger import ForensicLedger
+        from main import run_simulation
+        ForensicLedger('audit_log.json')
+        before = Path('audit_log.json').read_bytes()
+        captured = StringIO()
+        with patch('core.ledger.os.replace', side_effect=OSError('failed veto write')):
+            try:
+                with redirect_stdout(captured):
+                    run_simulation([
+                        {'name': 'bad', 'input_probs': [-0.1, 1.1]}
+                    ], ledger_file='audit_log.json')
+            except OSError:
+                pass
+            else:
+                raise AssertionError('VETO receipt failure was swallowed')
+        assert '[SENTINEL] VETO' not in captured.getvalue()
+        assert Path('audit_log.json').read_bytes() == before
+        print('NO_VETO_ANNOUNCEMENT_WITHOUT_RECEIPT_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "NO_VETO_ANNOUNCEMENT_WITHOUT_RECEIPT_PASS"
