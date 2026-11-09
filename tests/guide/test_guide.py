@@ -416,3 +416,56 @@ def test_monitor_known_distributions_still_have_expected_entropy(guide):
     """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[-1] == "DISTRIBUTIONS_PASS"
+
+
+# --- Cross-component integration gates (both repair branches together) -------
+
+
+def test_integrated_monitor_sentinel_and_ledger_roundtrip(project):
+    result = run_py(project, """
+        from core.sentinel import Sentinel
+        from core.sim_engine import SignalIntegrityMonitor
+        from core.ledger import ForensicLedger
+        monitor = SignalIntegrityMonitor()
+        sentinel = Sentinel(uncertainty_threshold=0.7)
+        ledger = ForensicLedger('audit_log.json')
+        statuses = []
+        for probabilities in ([1.0, 0.0], [0.5, 0.5]):
+            observation = monitor.analyze_signal(probabilities)
+            verdict = sentinel.evaluate(observation)
+            ledger.record_event({
+                'input': probabilities,
+                'analysis': observation,
+                'decision': verdict,
+            })
+            statuses.append(verdict['status'])
+        assert statuses == ['APPROVED', 'VETO']
+        assert ledger.verify_chain()
+        reread = ForensicLedger('audit_log.json')
+        assert len(reread.chain) == 3
+        assert [x['data']['decision']['status'] for x in reread.chain[1:]] == statuses
+        print('COMBINED_CONTROL_PLANE_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "COMBINED_CONTROL_PLANE_PASS"
+
+
+def test_negative_control_bad_input_has_no_automatic_veto_receipt(project):
+    # Known remaining limit: monitor refuses invalid input, but this prototype
+    # does not yet catch it in a top-level runtime and commit a VETO receipt.
+    # This observes the gap rather than silently promoting a safety claim.
+    result = run_py(project, """
+        from core.ledger import ForensicLedger
+        from core.sim_engine import SignalIntegrityMonitor
+        ledger = ForensicLedger('audit_log.json')
+        try:
+            SignalIntegrityMonitor().analyze_signal([-0.1, 1.1])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('invalid input accepted')
+        assert len(ledger.chain) == 1  # Genesis only; no VETO receipt.
+        print('OPEN_GAP_NO_AUTOMATIC_VETO_RECEIPT')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "OPEN_GAP_NO_AUTOMATIC_VETO_RECEIPT"
