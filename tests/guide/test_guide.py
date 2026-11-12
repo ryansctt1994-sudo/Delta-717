@@ -350,3 +350,69 @@ def test_negative_control_whole_chain_rehash_is_not_authenticated(project):
     """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[-1] == "UNAUTHENTICATED_REHASH_CONFIRMED"
+
+
+# --- NC-02/03/04: returned alias, tail bound and strict proof serialization --
+
+
+def test_returned_block_cannot_mutate_stored_or_future_history(project):
+    result = run_py(project, """
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        receipt = ledger.record_event({'decision': {'status': 'VETO'}})
+        receipt['data']['decision']['status'] = 'APPROVED'
+        receipt['index'] = 999
+        assert ledger.chain[-1]['data']['decision']['status'] == 'VETO'
+        assert ledger.chain[-1]['index'] == 2
+        ledger.record_event({'decision': {'status': 'NEXT'}})
+        reread = ForensicLedger('audit_log.json')
+        assert reread.verify_chain()
+        assert reread.chain[1]['data']['decision']['status'] == 'VETO'
+        assert reread.chain[1]['index'] == 2
+        print('DETACHED_RETURN_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'DETACHED_RETURN_PASS'
+
+
+def test_unsigned_tail_tamper_is_an_explicit_unclosed_limit(project):
+    # Negative assurance control, not a detected attack: there is no external
+    # authenticated head checkpoint, so the terminal block can be changed.
+    result = run_py(project, """
+        import json
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        ledger.record_event({'decision': 'VETO'})
+        path = Path('audit_log.json')
+        chain = json.loads(path.read_text())
+        chain[-1]['data']['decision'] = 'APPROVED'
+        path.write_text(json.dumps(chain))
+        assert ForensicLedger('audit_log.json').verify_chain()
+        print('UNAUTHENTICATED_TAIL_LIMIT_CONFIRMED')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'UNAUTHENTICATED_TAIL_LIMIT_CONFIRMED'
+
+
+def test_nonfinite_proof_is_rejected_before_state_or_file_change(project):
+    result = run_py(project, """
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        path = Path('audit_log.json')
+        ledger = ForensicLedger(str(path))
+        original = path.read_bytes()
+        original_length = len(ledger.chain)
+        for bad in (float('nan'), float('inf'), float('-inf')):
+            try:
+                ledger.record_event({'decision': 'VETO'}, proof=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('nonfinite proof accepted')
+            assert path.read_bytes() == original
+            assert len(ledger.chain) == original_length
+        print('NONFINITE_PROOF_REFUSED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'NONFINITE_PROOF_REFUSED_PASS'
