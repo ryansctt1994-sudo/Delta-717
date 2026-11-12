@@ -264,3 +264,26 @@ def test_monitor_known_distributions_still_have_expected_entropy(guide):
     """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[-1] == "DISTRIBUTIONS_PASS"
+
+
+# --- NC-01: exceptional numeric conversion must remain fail-closed -----------
+
+
+def test_extremely_large_integer_causes_explicit_veto_not_exception(guide):
+    result = run_py(guide[0], """
+        from core.sentinel import Sentinel
+        from core.sim_engine import SignalIntegrityMonitor
+        huge = 10 ** 400
+        decision = Sentinel(uncertainty_threshold=0.7).evaluate(
+            {'epistemic_uncertainty': huge})
+        assert decision['status'] == 'VETO', decision
+        try:
+            SignalIntegrityMonitor().analyze_signal([huge, 0])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('oversized numeric input was not refused')
+        print('EXCEPTIONAL_NUMERIC_VETO_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "EXCEPTIONAL_NUMERIC_VETO_PASS"
