@@ -198,3 +198,221 @@ def test_signal_monitor_rejects_non_distributions(guide):
     """)
     lines = [line for line in result.stdout.splitlines() if "initialized" not in line]
     assert lines == ["1.0", "0.0", "REFUSED"], result.stdout + result.stderr
+
+
+# --- Atomic snapshot and fail-closed ledger structure -------------------------
+
+
+@pytest.mark.parametrize(
+    "invalid_chain",
+    [
+        "[]",
+        "'not a chain'",
+        "[3]",
+        "[{'index': 0, 'previous_hash': '0', 'timestamp': 't', 'proof': 1, 'data': {}}]",
+        "[{'index': 1, 'previous_hash': '0', 'timestamp': 't', 'proof': 1}]",
+    ],
+    ids=["empty", "not-list", "not-dict", "incorrect-genesis-index", "missing-field"],
+)
+def test_malformed_existing_ledger_is_refused_without_overwrite(project, invalid_chain):
+    result = run_py(project, f"""
+        import json
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        original = json.dumps({invalid_chain})
+        path = Path('audit_log.json')
+        path.write_text(original)
+        try:
+            ForensicLedger(str(path))
+        except ValueError:
+            print('REFUSED')
+        else:
+            print('ACCEPTED')
+        assert path.read_text() == original
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "REFUSED"
+
+
+def test_failed_atomic_replace_preserves_previous_snapshot_and_memory(project):
+    result = run_py(project, """
+        import os
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.ledger import ForensicLedger
+        path = Path('audit_log.json')
+        ledger = ForensicLedger(str(path))
+        previous = path.read_bytes()
+        chain_length = len(ledger.chain)
+        with patch('core.ledger.os.replace', side_effect=OSError('simulated replace failure')):
+            try:
+                ledger.record_event({'status': 'PENDING'})
+                raise AssertionError('expected failed save')
+            except OSError:
+                pass
+        assert path.read_bytes() == previous
+        assert len(ledger.chain) == chain_length
+        assert ForensicLedger(str(path)).verify_chain()
+        assert not list(path.parent.glob('.audit_log.json.*.tmp'))
+        print('ATOMIC_ROLLBACK_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "ATOMIC_ROLLBACK_PASS"
+
+
+def test_replace_receives_complete_staged_json_before_original_changes(project):
+    result = run_py(project, """
+        import json
+        import os
+        from pathlib import Path
+        from unittest.mock import patch
+        from core.ledger import ForensicLedger
+        path = Path('audit_log.json')
+        ledger = ForensicLedger(str(path))
+        previous = path.read_bytes()
+        real_replace = os.replace
+        def checked_replace(staged, target):
+            with open(staged, encoding='utf-8') as f:
+                pending = json.load(f)
+            assert len(pending) == 2
+            assert path.read_bytes() == previous
+            return real_replace(staged, target)
+        with patch('core.ledger.os.replace', side_effect=checked_replace):
+            ledger.record_event({'status': 'APPROVED'})
+        assert len(ledger.chain) == 2
+        assert ForensicLedger(str(path)).verify_chain()
+        print('ATOMIC_REPLACE_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "ATOMIC_REPLACE_PASS"
+
+
+def test_caller_cannot_mutate_ledger_event_after_recording(project):
+    result = run_py(project, """
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        payload = {'decision': {'status': 'VETO'}, 'values': [1, 2]}
+        ledger.record_event(payload)
+        payload['decision']['status'] = 'APPROVED'
+        payload['values'].append(3)
+        assert ledger.chain[-1]['data'] == {
+            'decision': {'status': 'VETO'}, 'values': [1, 2]
+        }
+        assert ledger.verify_chain()
+        assert ForensicLedger('audit_log.json').verify_chain()
+        print('SNAPSHOT_ISOLATED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "SNAPSHOT_ISOLATED_PASS"
+
+
+def test_nonfinite_event_payload_cannot_change_snapshot(project):
+    result = run_py(project, """
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        path = Path('audit_log.json')
+        old = path.read_bytes()
+        old_length = len(ledger.chain)
+        try:
+            ledger.record_event({'value': float('nan')})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('nonfinite JSON payload was accepted')
+        assert path.read_bytes() == old
+        assert len(ledger.chain) == old_length
+        print('NONFINITE_REJECTED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "NONFINITE_REJECTED_PASS"
+
+
+def test_negative_control_whole_chain_rehash_is_not_authenticated(project):
+    # This test deliberately confirms the *limit* of an unsigned hash chain.
+    # Recomputing its links after editing an event can still fool verification.
+    result = run_py(project, """
+        import json
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        ledger.record_event({'decision': 'VETO'})
+        ledger.record_event({'decision': 'VETO'})
+        path = Path('audit_log.json')
+        chain = json.loads(path.read_text())
+        chain[1]['data']['decision'] = 'APPROVED'
+        for i in range(2, len(chain)):
+            chain[i]['previous_hash'] = ForensicLedger._hash(None, chain[i-1])
+        path.write_text(json.dumps(chain))
+        assert ForensicLedger('audit_log.json').verify_chain()
+        print('UNAUTHENTICATED_REHASH_CONFIRMED')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "UNAUTHENTICATED_REHASH_CONFIRMED"
+
+
+# --- NC-02/03/04: returned alias, tail bound and strict proof serialization --
+
+
+def test_returned_block_cannot_mutate_stored_or_future_history(project):
+    result = run_py(project, """
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        receipt = ledger.record_event({'decision': {'status': 'VETO'}})
+        receipt['data']['decision']['status'] = 'APPROVED'
+        receipt['index'] = 999
+        assert ledger.chain[-1]['data']['decision']['status'] == 'VETO'
+        assert ledger.chain[-1]['index'] == 2
+        ledger.record_event({'decision': {'status': 'NEXT'}})
+        reread = ForensicLedger('audit_log.json')
+        assert reread.verify_chain()
+        assert reread.chain[1]['data']['decision']['status'] == 'VETO'
+        assert reread.chain[1]['index'] == 2
+        print('DETACHED_RETURN_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'DETACHED_RETURN_PASS'
+
+
+def test_unsigned_tail_tamper_is_an_explicit_unclosed_limit(project):
+    # Negative assurance control, not a detected attack: there is no external
+    # authenticated head checkpoint, so the terminal block can be changed.
+    result = run_py(project, """
+        import json
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        ledger.record_event({'decision': 'VETO'})
+        path = Path('audit_log.json')
+        chain = json.loads(path.read_text())
+        chain[-1]['data']['decision'] = 'APPROVED'
+        path.write_text(json.dumps(chain))
+        assert ForensicLedger('audit_log.json').verify_chain()
+        print('UNAUTHENTICATED_TAIL_LIMIT_CONFIRMED')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'UNAUTHENTICATED_TAIL_LIMIT_CONFIRMED'
+
+
+def test_nonfinite_proof_is_rejected_before_state_or_file_change(project):
+    result = run_py(project, """
+        from pathlib import Path
+        from core.ledger import ForensicLedger
+        path = Path('audit_log.json')
+        ledger = ForensicLedger(str(path))
+        original = path.read_bytes()
+        original_length = len(ledger.chain)
+        for bad in (float('nan'), float('inf'), float('-inf')):
+            try:
+                ledger.record_event({'decision': 'VETO'}, proof=bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('nonfinite proof accepted')
+            assert path.read_bytes() == original
+            assert len(ledger.chain) == original_length
+        print('NONFINITE_PROOF_REFUSED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'NONFINITE_PROOF_REFUSED_PASS'
