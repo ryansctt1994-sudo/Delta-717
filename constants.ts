@@ -291,13 +291,16 @@ class ForensicLedger:
         # Reject non-JSON and nonfinite numeric payloads rather than silently
         # admitting values that cannot round-trip as JSON.
         frozen_data = json.loads(json.dumps(event_data, allow_nan=False))
+        # Strictly validate all caller-supplied block fields, including proof.
+        frozen_proof = json.loads(json.dumps(proof, allow_nan=False))
         previous_block = self.get_previous_block()
         previous_hash = self._hash(previous_block)
-        block = self._create_block(proof, previous_hash, frozen_data)
+        block = self._create_block(frozen_proof, previous_hash, frozen_data)
         next_chain = self.chain + [block]
         self._save_chain(next_chain)
         self.chain = next_chain
-        return block
+        # Never expose the authoritative in-memory block through the return value.
+        return json.loads(json.dumps(block, allow_nan=False))
 `,
   'core/sentinel.py': `import math
 import numpy as np
@@ -338,9 +341,13 @@ class Sentinel:
         if uncertainty is None:
             return {'status': 'VETO', 'reason': 'Missing epistemic_uncertainty value.'}
         if (isinstance(uncertainty, (bool, np.bool_))
-                or not isinstance(uncertainty, (int, float, np.integer, np.floating))
-                or not math.isfinite(float(uncertainty))
-                or not 0.0 <= float(uncertainty) <= 1.0):
+                or not isinstance(uncertainty, (int, float, np.integer, np.floating))):
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
+        try:
+            numeric_uncertainty = float(uncertainty)
+        except (TypeError, ValueError, OverflowError):
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
+        if not math.isfinite(numeric_uncertainty) or not 0.0 <= numeric_uncertainty <= 1.0:
             return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
 
         if uncertainty >= self.threshold:
@@ -379,7 +386,7 @@ class SignalIntegrityMonitor:
         """
         try:
             probabilities = np.asarray(probability_distribution, dtype=float)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("Probabilities must be a numeric vector.") from exc
 
         if (probabilities.ndim != 1 or probabilities.size == 0
