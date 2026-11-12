@@ -198,3 +198,92 @@ def test_signal_monitor_rejects_non_distributions(guide):
     """)
     lines = [line for line in result.stdout.splitlines() if "initialized" not in line]
     assert lines == ["1.0", "0.0", "REFUSED"], result.stdout + result.stderr
+
+
+# --- Boundary regression: never approve invalid uncertainty -----------------
+
+
+@pytest.mark.parametrize(
+    "bad_probs",
+    [
+        "[-0.1, 1.1]",
+        "[float('nan'), 1.0]",
+        "[float('inf'), float('-inf')]",
+        "[0.2, 0.2]",
+        "[]",
+        "1.0",
+        "[[0.5, 0.5]]",
+    ],
+    ids=["negative", "nan", "infinite", "unnormalized", "empty", "scalar", "matrix"],
+)
+def test_monitor_rejects_invalid_probability_vectors(guide, bad_probs):
+    result = run_py(guide[0], f"""
+        import numpy as np
+        from core.sim_engine import SignalIntegrityMonitor
+        monitor = SignalIntegrityMonitor()
+        try:
+            monitor.analyze_signal(np.asarray({bad_probs}, dtype=float))
+        except ValueError:
+            print('REFUSED')
+        else:
+            print('ACCEPTED')
+    """)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines()[-1] == "REFUSED", result.stdout + result.stderr
+
+
+def test_sentinel_rejects_nonfinite_out_of_range_and_non_numeric_values(guide):
+    result = run_py(guide[0], """
+        from core.sentinel import Sentinel
+        s = Sentinel(uncertainty_threshold=0.7)
+        invalid = [float('nan'), float('inf'), float('-inf'),
+                   -0.1, 1.1, '0.1', True, None, complex(1, 0)]
+        for value in invalid:
+            assert s.evaluate({'epistemic_uncertainty': value})['status'] == 'VETO', value
+        for malformed in (None, [], 'monitor'):
+            assert s.evaluate(malformed)['status'] == 'VETO'
+        assert s.evaluate({'epistemic_uncertainty': 0.0})['status'] == 'APPROVED'
+        assert s.evaluate({'epistemic_uncertainty': 0.7})['status'] == 'VETO'
+        assert s.evaluate({'epistemic_uncertainty': 1.0})['status'] == 'VETO'
+        print('BOUNDARY_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "BOUNDARY_PASS"
+
+
+def test_monitor_known_distributions_still_have_expected_entropy(guide):
+    result = run_py(guide[0], """
+        import numpy as np
+        from core.sim_engine import SignalIntegrityMonitor
+        monitor = SignalIntegrityMonitor()
+        assert monitor.analyze_signal([1.0])['epistemic_uncertainty'] == 0.0
+        assert monitor.analyze_signal([0.0, 1.0])['epistemic_uncertainty'] == 0.0
+        assert monitor.analyze_signal([0.5, 0.5])['epistemic_uncertainty'] == 1.0
+        assert monitor.analyze_signal(np.array([0.25] * 4))['epistemic_uncertainty'] == 1.0
+        print('DISTRIBUTIONS_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "DISTRIBUTIONS_PASS"
+
+
+# --- NC-01: exceptional numeric conversion must remain fail-closed -----------
+
+
+def test_extremely_large_integer_causes_explicit_veto_not_exception(guide):
+    result = run_py(guide[0], """
+        from core.sentinel import Sentinel
+        from core.sim_engine import SignalIntegrityMonitor
+        huge = 10 ** 400
+        decision = Sentinel(uncertainty_threshold=0.7).evaluate(
+            {'epistemic_uncertainty': huge})
+        assert decision['status'] == 'VETO', decision
+        try:
+            SignalIntegrityMonitor().analyze_signal([huge, 0])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('oversized numeric input was not refused')
+        print('EXCEPTIONAL_NUMERIC_VETO_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == "EXCEPTIONAL_NUMERIC_VETO_PASS"
