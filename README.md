@@ -22,6 +22,8 @@ What `tests/guide` establishes, and nothing more:
 - **Integrity limit:** this is a locally self-hashed file, not an authenticated or immutable WORM ledger. A writer can rebuild hashes, truncate history or overwrite the file; even an un-rehashed edit to the final block payload can pass verification because it has no successor link. Atomic replacement does not add inter-process concurrency control, power-loss guarantees, signed checkpoints or a trusted external witness.
 - The Sentinel and the signal monitor keep their stated contracts.
 - The demo control loop records a **VETO receipt** when the monitor rejects malformed probability inputs and only prints an approval/disposition after the local ledger save succeeds. This is a demonstration-level contract, not an independently enforced execution veto.
+- The local ledger exposes a defensive `.chain` snapshot and a detached `get_previous_block()` result. This protects the public read API against accidental caller mutation, but private process internals, disk files, and writers with local access are not independently authenticated.
+- The demo records non-dictionary scenarios and serialization failures as VETO receipts for the exercised inputs. Other malformed inputs, environment failures, and power loss are outside the demonstrated receipt contract. Normalized Shannon entropy measures distributional dispersion, not epistemic uncertainty, safety, or calibration.
 
 ```bash
 pip install "numpy>=1.24.0" "scipy>=1.10.0" pytest

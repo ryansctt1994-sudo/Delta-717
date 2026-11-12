@@ -674,3 +674,132 @@ def test_failed_ledger_save_cannot_report_veto(project):
     """)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stdout.splitlines()[-1] == "NO_VETO_ANNOUNCEMENT_WITHOUT_RECEIPT_PASS"
+
+
+# --- D717-REV-004 to REV-007: hardened demonstration boundaries -------------
+
+
+def test_sentinel_uses_validated_numeric_not_spoofed_comparison(guide):
+    result = run_py(guide[0], """
+        from core.sentinel import Sentinel
+        class LyingInt(int):
+            def __ge__(self, other):
+                return False
+        s = Sentinel(uncertainty_threshold=0.7)
+        assert s.evaluate({'epistemic_uncertainty': 1})['status'] == 'VETO'
+        assert s.evaluate({'epistemic_uncertainty': LyingInt(1)})['status'] == 'VETO'
+        print('VALIDATED_FLOAT_COMPARISON_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'VALIDATED_FLOAT_COMPARISON_PASS'
+
+
+def test_public_chain_and_previous_block_cannot_mutate_history(project):
+    result = run_py(project, """
+        from core.ledger import ForensicLedger
+        ledger = ForensicLedger('audit_log.json')
+        ledger.record_event({'decision': {'status': 'VETO'}})
+        ledger.chain[-1]['data']['decision']['status'] = 'APPROVED'
+        ledger.get_previous_block()['data']['decision']['status'] = 'APPROVED'
+        ledger.chain.append({'index': 999})
+        try:
+            ledger.chain = []
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError('public chain setter is mutable')
+        ledger.record_event({'decision': 'NEXT'})
+        reread = ForensicLedger('audit_log.json')
+        assert reread.verify_chain()
+        assert len(reread.chain) == 3
+        assert reread.chain[1]['data']['decision']['status'] == 'VETO'
+        print('PUBLIC_CHAIN_ISOLATED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'PUBLIC_CHAIN_ISOLATED_PASS'
+
+
+@pytest.mark.parametrize(
+    'invalid_expr', ['[]', "'not a mapping'", 'None'],
+    ids=['list', 'string', 'none'],
+)
+def test_nonmapping_scenario_records_veto(project, invalid_expr):
+    result = run_py(project, f"""
+        from pathlib import Path
+        from main import run_simulation
+        from core.ledger import ForensicLedger
+        run_simulation([{invalid_expr}], ledger_file='audit_log.json')
+        chain = ForensicLedger('audit_log.json').chain
+        assert len(chain) == 2
+        event = chain[1]['data']
+        assert event['sentinel_decision']['status'] == 'VETO'
+        assert event['sim_analysis']['validation_error_type'] == 'InvalidScenarioType'
+        print('INVALID_SCENARIO_RECEIPTED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'INVALID_SCENARIO_RECEIPTED_PASS'
+
+
+@pytest.mark.parametrize(
+    'values_expr', ['[-0.1, 1.1]', '[1.0, 0.0]'],
+    ids=['invalid_vector', 'otherwise_approvable_vector'],
+)
+def test_tolist_exception_always_yields_recorded_veto(project, values_expr):
+    result = run_py(project, f"""
+        import json
+        import numpy as np
+        from pathlib import Path
+        from main import run_simulation
+        from core.ledger import ForensicLedger
+        class BrokenList:
+            def __array__(self, dtype=None, copy=None):
+                return np.array({values_expr}, dtype=dtype)
+            def tolist(self):
+                raise RuntimeError('synthetic serialization failure')
+        run_simulation([{{'name': 'broken', 'input_probs': BrokenList()}}],
+                       ledger_file='audit_log.json')
+        event = ForensicLedger('audit_log.json').chain[-1]['data']
+        assert event['sentinel_decision']['status'] == 'VETO'
+        assert event['sim_analysis']['validation_error_type'] == 'InputSerializationError'
+        assert event['input_vector']['original_not_json_safe'] is True
+        assert event['input_vector']['serialization_error_type'] == 'RuntimeError'
+        json.loads(Path('audit_log.json').read_text(),
+                   parse_constant=lambda token: (_ for _ in ()).throw(AssertionError(token)))
+        print('SERIALIZATION_VETO_RECEIPTED_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'SERIALIZATION_VETO_RECEIPTED_PASS'
+
+
+def test_demo_reports_no_approval_for_valid_but_unserializable_input(project):
+    result = run_py(project, """
+        from contextlib import redirect_stdout
+        from io import StringIO
+        import numpy as np
+        from main import run_simulation
+        class BrokenList:
+            def __array__(self, dtype=None, copy=None):
+                return np.array([1.0, 0.0], dtype=dtype)
+            def tolist(self):
+                raise RuntimeError('test exception')
+        output = StringIO()
+        with redirect_stdout(output):
+            run_simulation([{'input_probs': BrokenList()}],
+                           ledger_file='audit_log.json')
+        assert 'Action APPROVED' not in output.getvalue()
+        assert '[SENTINEL] VETO' in output.getvalue()
+        print('NO_APPROVAL_WITH_UNRECORDABLE_INPUT_PASS')
+    """)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.splitlines()[-1] == 'NO_APPROVAL_WITH_UNRECORDABLE_INPUT_PASS'
+
+
+def test_guide_docs_scope_entropy_and_unsigned_ledger(guide):
+    root, _ = guide
+    readme = (root / 'README.md').read_text(encoding='utf-8')
+    whitepaper = (root / 'docs' / 'whitepaper.md').read_text(encoding='utf-8')
+    assert 'not a production' in readme
+    assert 'unauthenticated' in readme
+    assert 'not a validated estimate of epistemic uncertainty' in readme
+    assert 'not authenticated' in whitepaper
+    assert 'not bound to a production executor' in whitepaper
