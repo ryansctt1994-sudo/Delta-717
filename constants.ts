@@ -303,9 +303,13 @@ class Sentinel:
         if uncertainty is None:
             return {'status': 'VETO', 'reason': 'Missing epistemic_uncertainty value.'}
         if (isinstance(uncertainty, (bool, np.bool_))
-                or not isinstance(uncertainty, (int, float, np.integer, np.floating))
-                or not math.isfinite(float(uncertainty))
-                or not 0.0 <= float(uncertainty) <= 1.0):
+                or not isinstance(uncertainty, (int, float, np.integer, np.floating))):
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
+        try:
+            numeric_uncertainty = float(uncertainty)
+        except (TypeError, ValueError, OverflowError):
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
+        if not math.isfinite(numeric_uncertainty) or not 0.0 <= numeric_uncertainty <= 1.0:
             return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
 
         if uncertainty >= self.threshold:
@@ -344,7 +348,7 @@ class SignalIntegrityMonitor:
         """
         try:
             probabilities = np.asarray(probability_distribution, dtype=float)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, ValueError, OverflowError) as exc:
             raise ValueError("Probabilities must be a numeric vector.") from exc
 
         if (probabilities.ndim != 1 or probabilities.size == 0
