@@ -21,12 +21,6 @@
     },
     {
       "term": "safe",
-      "file": "constants.ts",
-      "contains": "engineering of safe and reliable AI",
-      "reason": "OWNER REVIEW: conclusion of the guide's whitepaper. Reword, or scope it to what tests/guide demonstrates."
-    },
-    {
-      "term": "safe",
       "file": "notes/zorel-symbiont-transcript.txt",
       "contains": "# 1. Safe Return if Disabled",
       "reason": "Not a claim: code-comment label in a pasted transcript. (The path it labels returns ALLOW when the gate is disabled; Weaver--Cathedral-'s rebuilt gate removes that fail-open mode.)"
