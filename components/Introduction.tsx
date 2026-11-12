@@ -11,22 +11,22 @@ const Card: React.FC<{ title: string; description: string }> = ({ title, descrip
 const Introduction: React.FC = () => {
   return (
     <section>
-      <h2 className="text-2xl font-bold text-white mb-2">Falsifiable AI Safety Infrastructure</h2>
+      <h2 className="text-2xl font-bold text-white mb-2">Delta-717 Governance Research Demonstration</h2>
       <p className="text-slate-400 max-w-4xl">
-        The Delta-717 Governance Core provides a robust, auditable, and automated oversight framework for high-stakes AI decision-making. It is built on the principle of falsifiability, ensuring that safety claims can be empirically tested and refuted by observable metrics in real-time.
+        This interactive guide demonstrates a normalized entropy threshold, an explicit veto result, and a locally hash-linked audit file. It is a research prototype, not a deployed or independently enforced safety system.
       </p>
       <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-6">
         <Card 
             title="Sentinel"
-            description="An active circuit breaker for AI systems. It's designed to halt operations upon detecting high-risk conditions based on model uncertainty."
+            description="A demonstration threshold evaluator returning APPROVED or VETO; it does not independently block external execution."
         />
         <Card 
             title="Signal Integrity Monitor"
-            description="Quantifies epistemic uncertainty (H_epsilon) using Shannon Entropy to gauge model confidence and the reliability of its outputs."
+            description="Calculates normalized Shannon entropy of supplied probabilities, a dispersion proxy rather than calibrated epistemic uncertainty or reliability."
         />
         <Card 
             title="Forensic Ledger"
-            description="An immutable audit trail implemented with hash chaining for a verifiable and tamper-proof log of all governance actions and system states."
+            description="Local hash-linked JSON snapshots with staged replacement, without external authentication or protection against whole-chain rewrites."
         />
       </div>
     </section>

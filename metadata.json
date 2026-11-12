@@ -1,5 +1,5 @@
 {
   "name": "Delta-717 Governance Core Setup Guide",
-  "description": "An interactive setup guide for the Delta-717 Governance Core, a falsifiable AI safety infrastructure. This guide provides a complete file structure, code viewer, and step-by-step installation instructions.",
+  "description": "An interactive setup guide for the Delta-717 Governance Core, a bounded research demonstration of entropy thresholds and unauthenticated local audit logs. This guide provides a complete file structure, code viewer, and step-by-step installation instructions.",
   "requestFramePermissions": []
 }
