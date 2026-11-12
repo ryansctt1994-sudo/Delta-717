@@ -21,6 +21,7 @@ What `tests/guide` establishes, and nothing more:
 - The ledger reloads and extends across runs and detects basic un-repaired edits, deletions, reorderings or insertions. Snapshot replacement is staged and atomic; a failed replacement leaves the earlier file and in-memory chain intact. Malformed chain structures are refused.
 - **Integrity limit:** this is a locally self-hashed file, not an authenticated or immutable WORM ledger. A writer can rebuild hashes, truncate history or overwrite the file; even an un-rehashed edit to the final block payload can pass verification because it has no successor link. Atomic replacement does not add inter-process concurrency control, power-loss guarantees, signed checkpoints or a trusted external witness.
 - The Sentinel and the signal monitor keep their stated contracts.
+- The demo control loop records a **VETO receipt** when the monitor rejects malformed probability inputs and only prints an approval/disposition after the local ledger save succeeds. This is a demonstration-level contract, not an independently enforced execution veto.
 
 ```bash
 pip install "numpy>=1.24.0" "scipy>=1.10.0" pytest

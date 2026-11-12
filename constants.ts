@@ -116,67 +116,92 @@ This repository contains the core production engine for the Delta-717 project.
   'requirements.txt': `numpy>=1.24.0
 scipy>=1.10.0
 jupyter`,
-  'main.py': `import sys
+  'main.py': `import json
 import numpy as np
 from core import Sentinel, SignalIntegrityMonitor, ForensicLedger
 
-def run_simulation():
+
+def _json_safe_input(raw):
+    """Preserve a reviewable input without writing nonstandard NaN JSON."""
+    values = raw.tolist() if hasattr(raw, 'tolist') else raw
+    try:
+        json.dumps(values, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        return {'repr': repr(raw), 'original_not_json_safe': True}
+    return values
+
+
+def run_simulation(scenarios=None, ledger_file='audit_log.json'):
+    """Run demo cases. Never report approval before a ledger receipt exists."""
     print("----------------------------------------------------------------")
-    print("   Delta-717 Governance Core | Falsifiable AI Safety System")
-    print("----------------------------------------------------------------\\n")
+    print("   Delta-717 Governance Core | Bounded Safety Demonstration")
+    print("----------------------------------------------------------------")
 
-    # 1. Initialize System Components
     print("[INIT] Initializing Sentinel (Circuit Breaker)...")
-    # Threshold 0.7: If entropy exceeds this, action is vetoed.
     sentinel = Sentinel(uncertainty_threshold=0.7)
-    
-    print("[INIT] Initializing Signal Integrity Monitor (Epistemic Uncertainty)...")
+    print("[INIT] Initializing Signal Integrity Monitor...")
     sim = SignalIntegrityMonitor()
-    
-    print("[INIT] Initializing Forensic Ledger (Immutable Audit Trail)...")
-    ledger = ForensicLedger(ledger_file='audit_log.json')
-    print("       > Ledger connected to 'audit_log.json'\\n")
+    print("[INIT] Initializing local hash-chained audit log...")
+    ledger = ForensicLedger(ledger_file=ledger_file)
 
-    # 2. Define Simulation Scenarios
-    scenarios = [
-        {
-            "name": "Scenario A: Routine Operation",
-            "input_probs": np.array([0.90, 0.05, 0.02, 0.02, 0.01]),
-            "description": "Model is confident (Low Entropy)."
-        },
-        {
-            "name": "Scenario B: Edge Case / Out-of-Distribution",
-            "input_probs": np.array([0.25, 0.25, 0.20, 0.15, 0.15]),
-            "description": "Model is confused/uncertain (High Entropy)."
-        }
-    ]
+    if scenarios is None:
+        scenarios = [
+            {
+                'name': 'Scenario A: Routine Operation',
+                'input_probs': np.array([0.90, 0.05, 0.02, 0.02, 0.01]),
+                'description': 'Model is confident (Low Entropy).'
+            },
+            {
+                'name': 'Scenario B: Edge Case / Out-of-Distribution',
+                'input_probs': np.array([0.25, 0.25, 0.20, 0.15, 0.15]),
+                'description': 'Model is confused/uncertain (High Entropy).'
+            }
+        ]
 
-    # 3. Execute Control Loop
     for scenario in scenarios:
-        print(f"Processing {scenario['name']}...")
-        print(f"   Context: {scenario['description']}")
-        
-        # Step A: Monitor Integrity
-        analysis = sim.analyze_signal(scenario['input_probs'])
-        entropy_val = analysis['epistemic_uncertainty']
-        print(f"   [SIM] Computed H_epsilon: {entropy_val:.4f}")
+        name = scenario.get('name', 'Unnamed scenario')
+        raw_input = scenario.get('input_probs')
+        print(f"Processing {name}...")
+        print(f"   Context: {scenario.get('description', '')}")
 
-        # Step B: Sentinel Decision
+        try:
+            analysis = sim.analyze_signal(raw_input)
+        except (ValueError, TypeError, OverflowError) as exc:
+            # Fail closed and record the rejection rather than leaving an
+            # invalid-input attempt outside the local audit trail.
+            analysis = {
+                'epistemic_uncertainty': None,
+                'validation_error_type': type(exc).__name__
+            }
+
         decision = sentinel.evaluate(analysis)
-        if decision['status'] == 'APPROVED':
-             print(f"   [SENTINEL] ✅ Action APPROVED. Risk within limits.")
-        else:
-             print(f"   [SENTINEL] ⛔ SOVEREIGN VETO. Risk threshold exceeded.")
-        
-        # Step C: Ledger Recording
+        if 'validation_error_type' in analysis:
+            decision = {
+                'status': 'VETO',
+                'reason': 'Invalid monitor input: ' + analysis['validation_error_type']
+            }
+
+        # Commit before exposing a decision. A failed write propagates and
+        # cannot accidentally print an APPROVED or VETO disposition.
         block = ledger.record_event({
-            'scenario': scenario['name'],
-            'input_vector': scenario['input_probs'].tolist(),
+            'scenario': name,
+            'input_vector': _json_safe_input(raw_input),
             'sim_analysis': analysis,
             'sentinel_decision': decision
         })
-        print(f"   [LEDGER] Event cryptographically committed to block #{block['index']}")
+
+        entropy_val = analysis.get('epistemic_uncertainty')
+        if entropy_val is None:
+            print("   [SIM] Entropy unavailable: invalid input")
+        else:
+            print(f"   [SIM] Computed H_epsilon: {entropy_val:.4f}")
+        if decision['status'] == 'APPROVED':
+            print("   [SENTINEL] Action APPROVED (demonstration only).")
+        else:
+            print("   [SENTINEL] VETO: action not approved.")
+        print(f"   [LEDGER] Local hash-chain event saved at block #{block['index']}")
         print("-" * 60)
+
 
 if __name__ == "__main__":
     run_simulation()
