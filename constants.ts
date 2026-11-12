@@ -116,67 +116,92 @@ This repository contains the core production engine for the Delta-717 project.
   'requirements.txt': `numpy>=1.24.0
 scipy>=1.10.0
 jupyter`,
-  'main.py': `import sys
+  'main.py': `import json
 import numpy as np
 from core import Sentinel, SignalIntegrityMonitor, ForensicLedger
 
-def run_simulation():
+
+def _json_safe_input(raw):
+    """Preserve a reviewable input without writing nonstandard NaN JSON."""
+    values = raw.tolist() if hasattr(raw, 'tolist') else raw
+    try:
+        json.dumps(values, allow_nan=False)
+    except (TypeError, ValueError, OverflowError):
+        return {'repr': repr(raw), 'original_not_json_safe': True}
+    return values
+
+
+def run_simulation(scenarios=None, ledger_file='audit_log.json'):
+    """Run demo cases. Never report approval before a ledger receipt exists."""
     print("----------------------------------------------------------------")
-    print("   Delta-717 Governance Core | Falsifiable AI Safety System")
-    print("----------------------------------------------------------------\\n")
+    print("   Delta-717 Governance Core | Bounded Safety Demonstration")
+    print("----------------------------------------------------------------")
 
-    # 1. Initialize System Components
     print("[INIT] Initializing Sentinel (Circuit Breaker)...")
-    # Threshold 0.7: If entropy exceeds this, action is vetoed.
     sentinel = Sentinel(uncertainty_threshold=0.7)
-    
-    print("[INIT] Initializing Signal Integrity Monitor (Epistemic Uncertainty)...")
+    print("[INIT] Initializing Signal Integrity Monitor...")
     sim = SignalIntegrityMonitor()
-    
-    print("[INIT] Initializing Forensic Ledger (Immutable Audit Trail)...")
-    ledger = ForensicLedger(ledger_file='audit_log.json')
-    print("       > Ledger connected to 'audit_log.json'\\n")
+    print("[INIT] Initializing local hash-chained audit log...")
+    ledger = ForensicLedger(ledger_file=ledger_file)
 
-    # 2. Define Simulation Scenarios
-    scenarios = [
-        {
-            "name": "Scenario A: Routine Operation",
-            "input_probs": np.array([0.90, 0.05, 0.02, 0.02, 0.01]),
-            "description": "Model is confident (Low Entropy)."
-        },
-        {
-            "name": "Scenario B: Edge Case / Out-of-Distribution",
-            "input_probs": np.array([0.25, 0.25, 0.20, 0.15, 0.15]),
-            "description": "Model is confused/uncertain (High Entropy)."
-        }
-    ]
+    if scenarios is None:
+        scenarios = [
+            {
+                'name': 'Scenario A: Routine Operation',
+                'input_probs': np.array([0.90, 0.05, 0.02, 0.02, 0.01]),
+                'description': 'Model is confident (Low Entropy).'
+            },
+            {
+                'name': 'Scenario B: Edge Case / Out-of-Distribution',
+                'input_probs': np.array([0.25, 0.25, 0.20, 0.15, 0.15]),
+                'description': 'Model is confused/uncertain (High Entropy).'
+            }
+        ]
 
-    # 3. Execute Control Loop
     for scenario in scenarios:
-        print(f"Processing {scenario['name']}...")
-        print(f"   Context: {scenario['description']}")
-        
-        # Step A: Monitor Integrity
-        analysis = sim.analyze_signal(scenario['input_probs'])
-        entropy_val = analysis['epistemic_uncertainty']
-        print(f"   [SIM] Computed H_epsilon: {entropy_val:.4f}")
+        name = scenario.get('name', 'Unnamed scenario')
+        raw_input = scenario.get('input_probs')
+        print(f"Processing {name}...")
+        print(f"   Context: {scenario.get('description', '')}")
 
-        # Step B: Sentinel Decision
+        try:
+            analysis = sim.analyze_signal(raw_input)
+        except (ValueError, TypeError, OverflowError) as exc:
+            # Fail closed and record the rejection rather than leaving an
+            # invalid-input attempt outside the local audit trail.
+            analysis = {
+                'epistemic_uncertainty': None,
+                'validation_error_type': type(exc).__name__
+            }
+
         decision = sentinel.evaluate(analysis)
-        if decision['status'] == 'APPROVED':
-             print(f"   [SENTINEL] ✅ Action APPROVED. Risk within limits.")
-        else:
-             print(f"   [SENTINEL] ⛔ SOVEREIGN VETO. Risk threshold exceeded.")
-        
-        # Step C: Ledger Recording
+        if 'validation_error_type' in analysis:
+            decision = {
+                'status': 'VETO',
+                'reason': 'Invalid monitor input: ' + analysis['validation_error_type']
+            }
+
+        # Commit before exposing a decision. A failed write propagates and
+        # cannot accidentally print an APPROVED or VETO disposition.
         block = ledger.record_event({
-            'scenario': scenario['name'],
-            'input_vector': scenario['input_probs'].tolist(),
+            'scenario': name,
+            'input_vector': _json_safe_input(raw_input),
             'sim_analysis': analysis,
             'sentinel_decision': decision
         })
-        print(f"   [LEDGER] Event cryptographically committed to block #{block['index']}")
+
+        entropy_val = analysis.get('epistemic_uncertainty')
+        if entropy_val is None:
+            print("   [SIM] Entropy unavailable: invalid input")
+        else:
+            print(f"   [SIM] Computed H_epsilon: {entropy_val:.4f}")
+        if decision['status'] == 'APPROVED':
+            print("   [SENTINEL] Action APPROVED (demonstration only).")
+        else:
+            print("   [SENTINEL] VETO: action not approved.")
+        print(f"   [LEDGER] Local hash-chain event saved at block #{block['index']}")
         print("-" * 60)
+
 
 if __name__ == "__main__":
     run_simulation()
@@ -190,10 +215,13 @@ __all__ = ["Sentinel", "SignalIntegrityMonitor", "ForensicLedger"]`,
   'core/ledger.py': `import json
 import hashlib
 import datetime
+import os
+import tempfile
+from pathlib import Path
 
 class ForensicLedger:
     """
-    Immutable audit trail with hash chaining for verifiable logging.
+    Local hash-chained audit log; not externally authenticated or tamper-proof.
     """
     def __init__(self, ledger_file='governance_ledger.json'):
         self.ledger_file = ledger_file
@@ -217,8 +245,24 @@ class ForensicLedger:
         return chain
 
     def _save_chain(self, chain):
-        with open(self.ledger_file, 'w') as f:
-            json.dump(chain, f, indent=4)
+        # Write a complete snapshot beside the ledger, then replace it atomically.
+        # This avoids truncating the previous snapshot if serialization or a
+        # write fails. It does NOT provide multi-process locking or an
+        # independently authenticated checkpoint.
+        ledger_path = Path(self.ledger_file)
+        fd, staging = tempfile.mkstemp(
+            prefix='.' + ledger_path.name + '.', suffix='.tmp',
+            dir=str(ledger_path.parent)
+        )
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(chain, f, indent=4)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(staging, ledger_path)
+        finally:
+            if os.path.exists(staging):
+                os.unlink(staging)
 
     def _hash(self, block):
         """Hashes a block."""
@@ -244,12 +288,22 @@ class ForensicLedger:
         Editing, deleting, inserting or reordering any block breaks a link.
         """
         chain = self.chain if chain is None else chain
-        if not chain or chain[0].get('previous_hash') != '0':
+        if not isinstance(chain, list) or not chain:
             return False
-        for i in range(1, len(chain)):
-            if chain[i].get('index') != i + 1:
+        for i, block in enumerate(chain):
+            if not isinstance(block, dict):
                 return False
-            if chain[i].get('previous_hash') != self._hash(chain[i - 1]):
+            if type(block.get('index')) is not int or block['index'] != i + 1:
+                return False
+            if not all(key in block for key in ('data', 'proof', 'timestamp')):
+                return False
+            previous_hash = block.get('previous_hash')
+            if not isinstance(previous_hash, str):
+                return False
+            if i == 0:
+                if previous_hash != '0':
+                    return False
+            elif previous_hash != self._hash(chain[i - 1]):
                 return False
         return True
 
@@ -257,14 +311,24 @@ class ForensicLedger:
         """
         Records a new event to the ledger.
         """
+        # Freeze caller-owned payload values before committing: changing the
+        # original input dictionary later must not rewrite live chain memory.
+        # Reject non-JSON and nonfinite numeric payloads rather than silently
+        # admitting values that cannot round-trip as JSON.
+        frozen_data = json.loads(json.dumps(event_data, allow_nan=False))
+        # Strictly validate all caller-supplied block fields, including proof.
+        frozen_proof = json.loads(json.dumps(proof, allow_nan=False))
         previous_block = self.get_previous_block()
         previous_hash = self._hash(previous_block)
-        block = self._create_block(proof, previous_hash, event_data)
-        self.chain.append(block)
-        self._save_chain(self.chain)
-        return block
+        block = self._create_block(frozen_proof, previous_hash, frozen_data)
+        next_chain = self.chain + [block]
+        self._save_chain(next_chain)
+        self.chain = next_chain
+        # Never expose the authoritative in-memory block through the return value.
+        return json.loads(json.dumps(block, allow_nan=False))
 `,
-  'core/sentinel.py': `import numpy as np
+  'core/sentinel.py': `import math
+import numpy as np
 
 class Sentinel:
     """
@@ -295,10 +359,21 @@ class Sentinel:
         Returns:
             dict: A decision dictionary with 'status' and 'reason'.
         """
-        uncertainty = monitor_output.get('epistemic_uncertainty')
+        if not isinstance(monitor_output, dict):
+            return {'status': 'VETO', 'reason': 'Monitor output must be a dictionary.'}
 
+        uncertainty = monitor_output.get('epistemic_uncertainty')
         if uncertainty is None:
             return {'status': 'VETO', 'reason': 'Missing epistemic_uncertainty value.'}
+        if (isinstance(uncertainty, (bool, np.bool_))
+                or not isinstance(uncertainty, (int, float, np.integer, np.floating))):
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
+        try:
+            numeric_uncertainty = float(uncertainty)
+        except (TypeError, ValueError, OverflowError):
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
+        if not math.isfinite(numeric_uncertainty) or not 0.0 <= numeric_uncertainty <= 1.0:
+            return {'status': 'VETO', 'reason': 'Invalid epistemic_uncertainty value.'}
 
         if uncertainty >= self.threshold:
             decision = {
@@ -334,21 +409,32 @@ class SignalIntegrityMonitor:
         Returns:
             dict: A dictionary containing the calculated epistemic uncertainty.
         """
-        if not np.isclose(np.sum(probability_distribution), 1.0):
+        try:
+            probabilities = np.asarray(probability_distribution, dtype=float)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Probabilities must be a numeric vector.") from exc
+
+        if (probabilities.ndim != 1 or probabilities.size == 0
+                or not np.all(np.isfinite(probabilities))
+                or np.any(probabilities < 0) or np.any(probabilities > 1)):
+            raise ValueError("Probabilities must be a nonempty finite vector in [0, 1].")
+        if not np.isclose(np.sum(probabilities), 1.0, rtol=0, atol=1e-9):
             raise ValueError("Probabilities must sum to 1.")
-        
+
         # Normalize entropy to be between 0 and 1 for easier interpretation.
         # H_max = log_2(N), where N is the number of outcomes.
-        num_outcomes = len(probability_distribution)
+        num_outcomes = len(probabilities)
         if num_outcomes <= 1:
             # Entropy is 0 if there's only one outcome
             normalized_entropy = 0.0
         else:
-            shannon_entropy = entropy(probability_distribution, base=2)
+            shannon_entropy = entropy(probabilities, base=2)
             max_entropy = np.log2(num_outcomes)
             normalized_entropy = shannon_entropy / max_entropy
 
-        return {'epistemic_uncertainty': normalized_entropy}
+        if not np.isfinite(normalized_entropy) or not -1e-12 <= normalized_entropy <= 1 + 1e-12:
+            raise ValueError("Computed uncertainty must be finite and normalized.")
+        return {'epistemic_uncertainty': float(np.clip(normalized_entropy, 0.0, 1.0))}
 `,
     'docs/whitepaper.md': `# Delta-717 Governance Core: A Falsifiable AI Safety Framework
 
