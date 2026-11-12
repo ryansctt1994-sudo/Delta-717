@@ -19,7 +19,7 @@ What `tests/guide` establishes, and nothing more:
 
 - `python main.py` runs from a fresh checkout, approves the low-entropy scenario and vetoes the high-entropy one.
 - The ledger reloads and extends across runs and detects basic un-repaired edits, deletions, reorderings or insertions. Snapshot replacement is staged and atomic; a failed replacement leaves the earlier file and in-memory chain intact. Malformed chain structures are refused.
-- **Integrity limit:** this is a locally self-hashed file, not an authenticated or immutable WORM ledger. A writer can rebuild hashes, truncate history or overwrite the file. Atomic replacement does not add inter-process concurrency control, power-loss guarantees, signed checkpoints or a trusted external witness.
+- **Integrity limit:** this is a locally self-hashed file, not an authenticated or immutable WORM ledger. A writer can rebuild hashes, truncate history or overwrite the file; even an un-rehashed edit to the final block payload can pass verification because it has no successor link. Atomic replacement does not add inter-process concurrency control, power-loss guarantees, signed checkpoints or a trusted external witness.
 - The Sentinel and the signal monitor keep their stated contracts.
 
 ```bash

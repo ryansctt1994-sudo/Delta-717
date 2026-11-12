@@ -291,13 +291,16 @@ class ForensicLedger:
         # Reject non-JSON and nonfinite numeric payloads rather than silently
         # admitting values that cannot round-trip as JSON.
         frozen_data = json.loads(json.dumps(event_data, allow_nan=False))
+        # Strictly validate all caller-supplied block fields, including proof.
+        frozen_proof = json.loads(json.dumps(proof, allow_nan=False))
         previous_block = self.get_previous_block()
         previous_hash = self._hash(previous_block)
-        block = self._create_block(proof, previous_hash, frozen_data)
+        block = self._create_block(frozen_proof, previous_hash, frozen_data)
         next_chain = self.chain + [block]
         self._save_chain(next_chain)
         self.chain = next_chain
-        return block
+        # Never expose the authoritative in-memory block through the return value.
+        return json.loads(json.dumps(block, allow_nan=False))
 `,
   'core/sentinel.py': `import numpy as np
 
